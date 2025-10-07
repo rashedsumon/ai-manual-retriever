@@ -1,25 +1,19 @@
-# app.py
 import os
-import glob
 import streamlit as st
 from pathlib import Path
 import pandas as pd
-from utils.docs_loader import load_text_from_files, extract_text_from_pdf
+from utils.docs_loader import extract_text_from_pdf
 from utils.embeddings_faiss import (
     build_faiss_index,
     query_faiss,
     save_faiss_index,
     load_faiss_index,
-    EMBEDDING_DIM,
-    compute_embeddings_batch,
 )
-import tempfile
 import openai
-import json
 
+# === Streamlit setup ===
 st.set_page_config(page_title="AI Manual Retriever (Prototype)", layout="wide")
 
-# === Sidebar / Config ===
 st.sidebar.title("Settings")
 embedding_backend = st.sidebar.selectbox(
     "Embeddings backend",
@@ -39,163 +33,156 @@ if openai_api_key:
 
 st.sidebar.markdown("---")
 st.sidebar.markdown(
-    "Prototype notes:\n\n- By default embeddings use `sentence-transformers` locally. "
-    "Set OpenAI key to use OpenAI for generation or embeddings.\n- You can upload PDFs or TXT files."
+    "Prototype notes:\n\n- Default embeddings use local sentence-transformers.\n"
+    "- Upload PDFs or TXT files or enable Kaggle sample data."
 )
 
-# === main area ===
 st.title("AI Manual Retriever — Prototype MVP")
 st.write(
-    """
-Upload one or more PDF / text files, or load provided Kaggle dataset sample.
-The app creates a vector index of document chunks and answers user queries by retrieving relevant passages.
-"""
+    "Upload one or more PDF / text files, or load provided Kaggle dataset sample.\n"
+    "The app builds a FAISS vector index and retrieves relevant passages to answer user questions."
 )
 
-# === Kaggle dataset paths (as provided by user) ===
-kaggle_csv_path = "/kaggle/input/data-retreiver/Data_ret.csv"
-kaggle_structured_dir = "/kaggle/input/data-retreiver/Structured data-20250319T105519Z-001/Structured data"
+# === Flexible Kaggle/local paths ===
+KAGGLE_CSV = "/kaggle/input/data-retreiver/Data_ret.csv"
+KAGGLE_STRUCTURED = "/kaggle/input/data-retreiver/Structured data-20250319T105519Z-001/Structured data"
+LOCAL_CSV = "data/Data_ret.csv"
+LOCAL_STRUCTURED = "data/Structured data"
 
+# === File uploader ===
 uploaded_files = st.file_uploader(
-    "Upload PDF or TXT files (you can upload multiple). Or check 'Load Kaggle dataset' in sidebar.",
+    "Upload PDF or TXT files (or enable Kaggle dataset in sidebar)",
     type=["pdf", "txt"],
     accept_multiple_files=True,
 )
 
-all_texts = []  # list of dicts: {"source":..., "text":...}
+all_texts = []  # store {"source":..., "text":...}
 
-# Optionally load Kaggle CSV and folder (if present in environment)
+# === Kaggle data loading ===
 if use_kaggle_data:
     st.markdown("### Loading example Kaggle dataset (if available)")
-    if Path(kaggle_csv_path).exists():
+
+    # Try Kaggle or local CSV
+    if Path(KAGGLE_CSV).exists():
+        csv_path = Path(KAGGLE_CSV)
+    elif Path(LOCAL_CSV).exists():
+        csv_path = Path(LOCAL_CSV)
+    else:
+        csv_path = None
+
+    if csv_path:
         try:
-            df = pd.read_csv(kaggle_csv_path)
-            st.write("Loaded CSV from Kaggle:", kaggle_csv_path)
+            df = pd.read_csv(csv_path)
+            st.write("✅ Loaded CSV from:", csv_path)
             st.dataframe(df.head(5))
-            # If CSV has text columns, add them as documents
             for i, row in df.iterrows():
                 text_cols = [str(v) for v in row.values if isinstance(v, (str, int, float))]
                 joined = " \n".join(text_cols)
                 if joined.strip():
-                    all_texts.append({"source": f"Kaggle CSV row {i}", "text": joined})
+                    all_texts.append({"source": f"CSV row {i}", "text": joined})
         except Exception as e:
-            st.error(f"Failed to read Kaggle CSV: {e}")
+            st.error(f"Failed to read CSV: {e}")
     else:
-        st.info(f"Kaggle CSV path not found: {kaggle_csv_path}")
+        st.warning("CSV not found in Kaggle or local path.")
 
-    if Path(kaggle_structured_dir).exists():
-        st.write("Scanning Kaggle structured data folder for text files:", kaggle_structured_dir)
-        patterns = ["**/*.txt", "**/*.pdf", "**/*.md"]
-        for patt in patterns:
-            for p in Path(kaggle_structured_dir).glob(patt):
-                st.write("Found:", str(p))
-                if p.suffix.lower() == ".pdf":
-                    text = extract_text_from_pdf(p)
-                    all_texts.append({"source": str(p), "text": text})
-                else:
-                    try:
-                        text = p.read_text(encoding="utf-8", errors="ignore")
-                        all_texts.append({"source": str(p), "text": text})
-                    except Exception:
-                        continue
+    # Try Kaggle or local structured folder
+    if Path(KAGGLE_STRUCTURED).exists():
+        structured_dir = Path(KAGGLE_STRUCTURED)
+    elif Path(LOCAL_STRUCTURED).exists():
+        structured_dir = Path(LOCAL_STRUCTURED)
     else:
-        st.info(f"Kaggle structured folder not found: {kaggle_structured_dir}")
+        structured_dir = None
 
-# Save uploaded files to a temp folder and load text
+    if structured_dir:
+        st.write("Scanning folder for PDFs/TXT:", structured_dir)
+        for ext in ("**/*.pdf", "**/*.txt", "**/*.md"):
+            for file in structured_dir.glob(ext):
+                try:
+                    if file.suffix.lower() == ".pdf":
+                        text = extract_text_from_pdf(file)
+                    else:
+                        text = file.read_text(encoding="utf-8", errors="ignore")
+                    all_texts.append({"source": str(file), "text": text})
+                except Exception as e:
+                    st.error(f"Error reading {file}: {e}")
+    else:
+        st.info("No structured data folder found.")
+
+# === Uploaded files ===
 if uploaded_files:
-    tmp_dir = Path("data/uploaded_files")
-    tmp_dir.mkdir(parents=True, exist_ok=True)
-    st.write(f"Saving {len(uploaded_files)} uploaded files to `{tmp_dir}` and extracting text...")
+    upload_dir = Path("data/uploaded_files")
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    st.write(f"Saving {len(uploaded_files)} uploaded files to `{upload_dir}` ...")
     for up in uploaded_files:
-        save_path = tmp_dir / up.name
+        save_path = upload_dir / up.name
         with open(save_path, "wb") as f:
             f.write(up.getbuffer())
-        if save_path.suffix.lower() == ".pdf":
-            text = extract_text_from_pdf(save_path)
-        else:
-            text = save_path.read_text(encoding="utf-8", errors="ignore")
+        text = extract_text_from_pdf(save_path) if save_path.suffix.lower() == ".pdf" else save_path.read_text(encoding="utf-8", errors="ignore")
         all_texts.append({"source": f"uploaded/{up.name}", "text": text})
 
+# === If no documents found ===
 if not all_texts:
-    st.info("No documents found yet. Upload PDFs/TXT or enable Kaggle data in the sidebar.")
+    st.info("No documents found. Upload PDFs/TXT or enable Kaggle dataset in sidebar.")
     st.stop()
 
-st.success(f"Found {len(all_texts)} documents / rows to index.")
+st.success(f"📚 Loaded {len(all_texts)} document(s) for indexing.")
 
-# === Build or load index ===
-index_path = Path("/tmp/faiss_index")  # simple persistence point in cloud
+# === Build/load FAISS index ===
+index_path = Path("/tmp/faiss_index")
 if persist_index and index_path.exists() and any(index_path.glob("*")):
-    st.info("Loading existing FAISS index from disk...")
+    st.info("Loading existing FAISS index from /tmp ...")
     index, metadata = load_faiss_index(str(index_path))
 else:
     index, metadata = None, None
 
-if st.button("Build (or rebuild) vector index from loaded documents"):
-    # prepare texts and metadata
-    documents = []
-    for doc in all_texts:
-        documents.append({"source": doc["source"], "text": doc["text"]})
-
-    # chunk, embed, build FAISS
-    with st.spinner("Building chunks, computing embeddings, and creating FAISS index..."):
-        index, metadata = build_faiss_index(documents, embedding_backend=embedding_backend, openai_key=openai_api_key)
-        st.success("Index built.")
+if st.button("Build / Rebuild FAISS Index"):
+    with st.spinner("Building FAISS index..."):
+        index, metadata = build_faiss_index(all_texts, embedding_backend=embedding_backend, openai_key=openai_api_key)
+        st.success("✅ Index built successfully.")
         if persist_index:
             save_faiss_index(index, metadata, str(index_path))
-            st.write("Index saved to", str(index_path))
+            st.info(f"Index saved to {index_path}")
 
-# If index is still None (not built nor loaded), ask to build
 if index is None or metadata is None:
-    st.warning("No vector index available. Please press 'Build (or rebuild) vector index...' to create it.")
+    st.warning("No index found. Please click 'Build / Rebuild FAISS Index'.")
     st.stop()
 
+# === Q&A section ===
 st.divider()
-st.header("Ask a question")
-question = st.text_input("Enter your question about the manuals / data:", "")
-top_k = st.slider("How many retrieved passages to use", 1, 10, 3)
+st.header("Ask a question about your manuals")
+question = st.text_input("Enter your question:", "")
+top_k = st.slider("Retrieved passages", 1, 10, 3)
 
 if st.button("Get answer") and question.strip():
     with st.spinner("Retrieving relevant passages..."):
         results = query_faiss(index, metadata, question, top_k=top_k, embedding_backend=embedding_backend, openai_key=openai_api_key)
-    # results: list of dicts {"source":..., "text":..., "score":...}
     st.subheader("Retrieved Passages")
     for r in results:
         st.markdown(f"**Source:** `{r['source']}` — score {r.get('score', 0):.4f}")
         st.write(r["text"][:2000])
         st.write("---")
 
-    # If OpenAI key present, generate a concise answer using retrieved context
     if openai_api_key:
-        st.subheader("AI-generated answer (OpenAI LLM)")
-        # build prompt
-        retrieved_text = "\n\n---\n\n".join([f"Source: {r['source']}\n\n{r['text']}" for r in results])
+        st.subheader("AI-generated summary answer")
+        context_text = "\n\n---\n\n".join([f"Source: {r['source']}\n\n{r['text']}" for r in results])
         prompt = (
-            "You are an assistant that answers the user's question using only the provided retrieved passages. "
-            "If the answer is not present, say 'I don't know from the provided documents.'\n\n"
-            f"Context:\n{retrieved_text}\n\nQuestion: {question}\n\nAnswer:"
+            "You are an assistant that answers the question using only the provided retrieved passages. "
+            "If unknown, say 'I don't know from the provided documents.'\n\n"
+            f"Context:\n{context_text}\n\nQuestion: {question}\n\nAnswer:"
         )
         try:
             resp = openai.ChatCompletion.create(
-                model="gpt-4o-mini" if "gpt-4o-mini" in openai.Model.list() else "gpt-4o",
+                model="gpt-4o-mini",
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=400,
                 temperature=0.0,
             )
             answer = resp["choices"][0]["message"]["content"].strip()
         except Exception as e:
-            # fallback to simpler call or model names
-            try:
-                resp = openai.ChatCompletion.create(
-                    model="gpt-3.5-turbo",
-                    messages=[{"role": "user", "content": prompt}],
-                    max_tokens=400,
-                    temperature=0.0,
-                )
-                answer = resp["choices"][0]["message"]["content"].strip()
-            except Exception as e2:
-                answer = f"(LLM call failed: {e2})"
+            answer = f"(LLM call failed: {e})"
         st.write(answer)
     else:
-        st.info("Set OpenAI API key in the sidebar to generate an LLM answer. For now, treat retrieved passages above as the answer.")
+        st.info("Set your OpenAI API key in the sidebar for AI-generated answers.")
 
-st.write("\n---\nPrototype built by bundling: simple PDF/text extraction → chunking → embeddings → FAISS retrieval → optional OpenAI LLM.")
+st.markdown("---")
+st.caption("Prototype: PDF/Text ➜ Embeddings ➜ FAISS ➜ Retrieval ➜ Optional LLM Answer.")
