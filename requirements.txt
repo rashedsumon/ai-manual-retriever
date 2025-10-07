@@ -1,0 +1,9 @@
+python
+streamlit
+pandas
+sentence-transformers
+faiss-cpu
+pdfplumber
+PyPDF2
+openai
+tqdm
