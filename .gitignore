@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+env/
+venv/
+.venv/
+.Python
+build/
+dist/
+*.egg-info/
+
+# Streamlit / local
+.streamlit/
+data/uploaded_files/
+tmp/
+tmp/**
+/tmp/faiss_index/
+
+# Secrets
+.env
+.env.* 
+secrets.toml
+*.pem
+*.key
